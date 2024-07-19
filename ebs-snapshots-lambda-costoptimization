@@ -1,0 +1,65 @@
+import boto3
+import logging
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+ec2 = boto3.client('ec2')
+
+def lambda_handler(event, context):
+    try:
+        # Describe all volumes
+        volumes = ec2.describe_volumes()['Volumes']
+        attached_volumes = set()
+
+        # Track volumes that are attached
+        for volume in volumes:
+            if volume['State'] == 'in-use':
+                attached_volumes.add(volume['VolumeId'])
+
+        # Describe all snapshots
+        snapshots = ec2.describe_snapshots(OwnerIds=['self'])['Snapshots']
+        
+        for snapshot in snapshots:
+            volume_id = snapshot['VolumeId']
+            
+            if volume_id not in attached_volumes:
+                # Check if the volume exists and its state
+                volume_exists = False
+                volume_available = False
+                
+                for volume in volumes:
+                    if volume['VolumeId'] == volume_id:
+                        volume_exists = True
+                        if volume['State'] == 'available':
+                            volume_available = True
+                        break
+                
+                if volume_exists:
+                    if volume_available:
+                        # Check if the instance associated with the volume is terminated
+                        instance_id = None
+                        for attachment in volume.get('Attachments', []):
+                            instance_id = attachment['InstanceId']
+                            break
+                        
+                        if instance_id:
+                            instance = ec2.describe_instances(InstanceIds=[instance_id])
+                            if instance['Reservations'][0]['Instances'][0]['State']['Name'] == 'terminated':
+                                logger.info(f"Deleting snapshot {snapshot['SnapshotId']} for volume {volume_id} attached to terminated instance {instance_id}")
+                                ec2.delete_snapshot(SnapshotId=snapshot['SnapshotId'])
+                        else:
+                            logger.info(f"Deleting snapshot {snapshot['SnapshotId']} for unattached volume {volume_id}")
+                            ec2.delete_snapshot(SnapshotId=snapshot['SnapshotId'])
+        
+        return {
+            'statusCode': 200,
+            'body': 'Snapshots cleanup complete'
+        }
+    except Exception as e:
+        logger.error(f"Error cleaning up snapshots: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': 'Error cleaning up snapshots'
+        }
